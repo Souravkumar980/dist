@@ -106,6 +106,24 @@ CREATE TABLE `reports` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -------------------------------------------------------------
+-- Table: feature_suggestions (User Suggestions to Admin) - Starts at 0
+-- -------------------------------------------------------------
+DROP TABLE IF EXISTS `feature_suggestions`;
+CREATE TABLE `feature_suggestions` (
+  `id` VARCHAR(100) NOT NULL,
+  `name` VARCHAR(150) NOT NULL,
+  `email` VARCHAR(200) NOT NULL,
+  `category` VARCHAR(100) DEFAULT 'New Feature',
+  `message` TEXT NOT NULL,
+  `ip_address` VARCHAR(64) DEFAULT NULL,
+  `is_read` TINYINT(1) DEFAULT 0,
+  `created_at` VARCHAR(64) NOT NULL,
+  PRIMARY KEY (`id`),
+  INDEX `idx_sug_read` (`is_read`),
+  INDEX `idx_sug_created` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -------------------------------------------------------------
 -- Table: votes (1 Upvote per IP) - Starts at 0
 -- -------------------------------------------------------------
 DROP TABLE IF EXISTS `votes`;

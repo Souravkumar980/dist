@@ -420,6 +420,18 @@ if ($pdo) {
         try { $pdo->exec("ALTER TABLE nationalist_influencers ADD COLUMN categories TEXT DEFAULT NULL"); } catch (Exception $e) {}
         try { $pdo->exec("ALTER TABLE nationalist_influencers ADD COLUMN other_links TEXT DEFAULT NULL"); } catch (Exception $e) {}
 
+        // Feature Suggestions table
+        $pdo->exec("CREATE TABLE IF NOT EXISTS feature_suggestions (
+            id VARCHAR(100) NOT NULL PRIMARY KEY,
+            name VARCHAR(150) NOT NULL,
+            email VARCHAR(200) NOT NULL,
+            category VARCHAR(100) DEFAULT 'New Feature',
+            message TEXT NOT NULL,
+            ip_address VARCHAR(64) DEFAULT NULL,
+            is_read TINYINT DEFAULT 0,
+            created_at VARCHAR(64) NOT NULL
+        );");
+
         // Reports table
         $pdo->exec("CREATE TABLE IF NOT EXISTS reports (
             id VARCHAR(100) NOT NULL PRIMARY KEY,
@@ -1537,6 +1549,64 @@ if ($endpoint === 'reports') {
     }
 }
 
+// Feature Suggestions Endpoint
+if ($endpoint === 'feature-suggestions') {
+    if ($method === 'POST') {
+        $name = trim($body['name'] ?? '');
+        $email = trim($body['email'] ?? '');
+        $category = trim($body['category'] ?? 'New Feature');
+        $message = trim($body['message'] ?? '');
+
+        if (!$name || !$email || !$message) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Name, email, and suggestion message are required.']);
+            exit;
+        }
+
+        $id = 'sug-' . time() . '-' . substr(md5(uniqid()), 0, 6);
+        $now = date('c');
+
+        if ($pdo) {
+            $stmt = $pdo->prepare("
+                INSERT INTO feature_suggestions (id, name, email, category, message, ip_address, is_read, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+            ");
+            $stmt->execute([$id, $name, $email, $category, $message, $ip, $now]);
+        }
+
+        echo json_encode(['success' => true, 'id' => $id, 'message' => 'Dhanyawad! Suggestion sent to admin desk.']);
+        exit;
+    }
+}
+
+// Geo-Check Endpoint (India IP validation)
+if ($endpoint === 'geo-check') {
+    $cfCountry = strtoupper(trim($_SERVER['HTTP_CF_IPCOUNTRY'] ?? ''));
+    $clientIp = getClientIp();
+
+    // Localhost or private networks
+    $isLocal = ($clientIp === '127.0.0.1' || $clientIp === '::1' || strpos($clientIp, '192.168.') === 0 || strpos($clientIp, '10.') === 0);
+
+    // If Cloudflare provided country
+    if ($cfCountry) {
+        $allowed = ($cfCountry === 'IN' || $isLocal);
+        echo json_encode([
+            'allowed' => $allowed,
+            'country' => $cfCountry,
+            'ip' => $clientIp
+        ]);
+        exit;
+    }
+
+    // Default allowed for direct/domestic visitors
+    echo json_encode([
+        'allowed' => true,
+        'country' => 'IN',
+        'ip' => $clientIp
+    ]);
+    exit;
+}
+
 // -------------------------------------------------------------
 // SOVEREIGN COMMUNITY ENDPOINTS (Public Chat, Channels, Admin)
 // -------------------------------------------------------------
@@ -2562,6 +2632,44 @@ if (strpos($endpoint, 'admin/') === 0) {
             } catch (Exception $e) {}
         }
         echo json_encode(['success' => true, 'status' => $newStatus]);
+        exit;
+    }
+
+    // Admin: Feature Suggestions list
+    if ($endpoint === 'admin/feature-suggestions' && $method === 'GET') {
+        $sugs = [];
+        if ($pdo) {
+            try {
+                $sugs = $pdo->query("SELECT * FROM feature_suggestions ORDER BY created_at DESC")->fetchAll();
+            } catch (Exception $e) {}
+        }
+        echo json_encode($sugs);
+        exit;
+    }
+
+    // Admin: Mark feature suggestion as read
+    if (preg_match('/^admin\/feature-suggestions\/([a-zA-Z0-9_-]+)\/read$/', $endpoint, $m)) {
+        $sugId = $m[1];
+        if ($pdo) {
+            try {
+                $stmt = $pdo->prepare("UPDATE feature_suggestions SET is_read = 1 WHERE id = ?");
+                $stmt->execute([$sugId]);
+            } catch (Exception $e) {}
+        }
+        echo json_encode(['success' => true, 'id' => $sugId]);
+        exit;
+    }
+
+    // Admin: Delete feature suggestion
+    if (preg_match('/^admin\/feature-suggestions\/([a-zA-Z0-9_-]+)$/', $endpoint, $m) && ($method === 'DELETE' || ($method === 'POST' && ($_GET['_method'] ?? '') === 'DELETE'))) {
+        $sugId = $m[1];
+        if ($pdo) {
+            try {
+                $stmt = $pdo->prepare("DELETE FROM feature_suggestions WHERE id = ?");
+                $stmt->execute([$sugId]);
+            } catch (Exception $e) {}
+        }
+        echo json_encode(['success' => true, 'id' => $sugId]);
         exit;
     }
 
