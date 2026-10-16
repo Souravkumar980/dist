@@ -603,9 +603,13 @@ if ($pdo) {
             ip_address VARCHAR(64) DEFAULT NULL,
             is_admin TINYINT(1) NOT NULL DEFAULT 0,
             is_banned TINYINT(1) NOT NULL DEFAULT 0,
+            name_change_count INT NOT NULL DEFAULT 0,
+            username_change_count INT NOT NULL DEFAULT 0,
             created_at VARCHAR(64) NOT NULL,
             updated_at VARCHAR(64) NOT NULL
         );");
+        try { $pdo->exec("ALTER TABLE community_users ADD COLUMN name_change_count INT NOT NULL DEFAULT 0"); } catch (Exception $e) {}
+        try { $pdo->exec("ALTER TABLE community_users ADD COLUMN username_change_count INT NOT NULL DEFAULT 0"); } catch (Exception $e) {}
 
         // Community Messages table
         $pdo->exec("CREATE TABLE IF NOT EXISTS community_messages (
@@ -721,6 +725,39 @@ $inputJson = file_get_contents('php://input');
 $body = json_decode($inputJson, true) ?: ($GLOBALS['body'] ?? $_POST ?? []);
 $ip       = getClientIp();
 
+// -------------------------------------------------------------
+// Security Gate 0: Immediate IP Blacklist & Scraper Termination
+// -------------------------------------------------------------
+// If IP is banned by admin, return literally NOTHING (empty page / die(''))
+$isAdminReq = is_admin_authorized($pdo);
+if ($pdo && !$isAdminReq) {
+    try {
+        $chkBlockEarly = $pdo->prepare("SELECT ip FROM blocked_ips WHERE ip = ?");
+        $chkBlockEarly->execute([$ip]);
+        if ($chkBlockEarly->fetch()) {
+            http_response_code(403);
+            die('');
+        }
+    } catch (Exception $e) {}
+}
+
+// Scraper / Code Extractor / Headless Bot Blocker: Return absolute blank (die(''))
+if (!$isAdminReq) {
+    $ua = strtolower($_SERVER['HTTP_USER_AGENT'] ?? '');
+    $scraperSignatures = [
+        'httrack', 'sitesucker', 'wget', 'curl', 'python-requests', 'python', 'aiohttp',
+        'scrapy', 'go-http-client', 'java/', 'libwww-perl', 'headlesschrome', 'phantomjs',
+        'selenium', 'puppeteer', 'extractor', 'offline', 'teleport', 'webcopier',
+        'site-copier', 'page-sucker', 'web-harvest', 'html-scraper', 'website-downloader'
+    ];
+    foreach ($scraperSignatures as $sig) {
+        if (strpos($ua, $sig) !== false) {
+            http_response_code(403);
+            die('');
+        }
+    }
+}
+
 // Support HTTP Method Override for shared web hosts (InfinityFree, Apache, FastCGI)
 $headers = get_request_headers();
 $methodOverride = $headers['x-http-method-override'] ?? $_SERVER['HTTP_X_HTTP_METHOD_OVERRIDE'] ?? $_GET['_method'] ?? $body['_method'] ?? null;
@@ -764,6 +801,52 @@ if ($endpoint !== 'health') {
         ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
         exit;
     }
+}
+
+// Check IP Status Endpoint
+if ($endpoint === 'check-ip') {
+    $isBlocked = false;
+    if ($pdo) {
+        try {
+            $stmt = $pdo->prepare("SELECT ip FROM blocked_ips WHERE ip = ?");
+            $stmt->execute([$ip]);
+            if ($stmt->fetch()) {
+                $isBlocked = true;
+            }
+        } catch (Exception $e) {}
+    }
+    if ($isBlocked) {
+        http_response_code(403);
+        die('');
+    }
+    echo json_encode(['blocked' => false, 'ip' => $ip]);
+    exit;
+}
+
+// Log DevTools / Code Inspect Attempt Endpoint
+if ($endpoint === 'security/inspect-attempt' && $method === 'POST') {
+    $now = date('c');
+    $attemptId = 'inspect_' . time() . '_' . rand(100, 999);
+    $actId = 'act_' . time() . '_' . rand(100, 999);
+    $details = 'DevTools / Inspect mode opened by user. IP flagged for admin review.';
+    if (!empty($body['userAgent'])) {
+        $details .= ' UA: ' . substr($body['userAgent'], 0, 150);
+    }
+
+    if ($pdo) {
+        try {
+            $stmt = $pdo->prepare("INSERT INTO blocked_attempts (id, ip, attempted_name, details, created_at) VALUES (?, ?, ?, ?, ?)");
+            $stmt->execute([$attemptId, $ip, '🚨 Inspect / DevTools Attempt', $details, $now]);
+        } catch (Exception $e) {}
+
+        try {
+            $stmt2 = $pdo->prepare("INSERT INTO activity_logs (id, action, details, ip, created_at) VALUES (?, ?, ?, ?, ?)");
+            $stmt2->execute([$actId, 'INSPECT_ATTEMPT', 'DevTools inspect attempt flagged from IP ' . $ip, $ip, $now]);
+        } catch (Exception $e) {}
+    }
+
+    echo json_encode(['success' => true, 'logged' => true, 'ip' => $ip]);
+    exit;
 }
 
 // System Health Check
@@ -1748,9 +1831,9 @@ if ($endpoint === 'community/sync' && $method === 'GET') {
 
         // 1. Users: If admin, full details; if public, strictly sanitize sensitive contact fields!
         if ($isAdmin) {
-            $users = $pdo->query("SELECT id, name, username, email, phone, avatar_url, verified_type, is_admin, is_banned, created_at FROM community_users ORDER BY created_at DESC")->fetchAll();
+            $users = $pdo->query("SELECT id, name, username, email, phone, avatar_url, verified_type, is_admin, is_banned, name_change_count, username_change_count, created_at FROM community_users ORDER BY created_at DESC")->fetchAll();
         } else {
-            $users = $pdo->query("SELECT id, name, username, avatar_url, verified_type, is_admin, is_banned, created_at FROM community_users WHERE is_banned = 0 ORDER BY created_at DESC")->fetchAll();
+            $users = $pdo->query("SELECT id, name, username, avatar_url, verified_type, is_admin, is_banned, name_change_count, username_change_count, created_at FROM community_users WHERE is_banned = 0 ORDER BY created_at DESC")->fetchAll();
         }
 
         // 2. Messages
@@ -1915,6 +1998,8 @@ if ($endpoint === 'community/register' && $method === 'POST') {
                 'verified_type' => $isAdmin ? 'influencer' : 'none',
                 'is_admin' => (bool)$isAdmin,
                 'is_banned' => 0,
+                'name_change_count' => 0,
+                'username_change_count' => 0,
                 'created_at' => $now
             ]
         ]);
@@ -1949,6 +2034,8 @@ if ($endpoint === 'community/login' && $method === 'POST') {
                 'verified_type' => 'influencer',
                 'is_admin' => true,
                 'is_banned' => 0,
+                'name_change_count' => 0,
+                'username_change_count' => 0,
                 'created_at' => '2025-01-01'
             ];
             echo json_encode(['success' => true, 'user' => $adminUser]);
@@ -1989,6 +2076,8 @@ if ($endpoint === 'community/login' && $method === 'POST') {
                 'verified_type' => $user['verified_type'],
                 'is_admin' => (bool)$user['is_admin'],
                 'is_banned' => 0,
+                'name_change_count' => (int)($user['name_change_count'] ?? 0),
+                'username_change_count' => (int)($user['username_change_count'] ?? 0),
                 'created_at' => $user['created_at']
             ]
         ]);
@@ -1996,19 +2085,32 @@ if ($endpoint === 'community/login' && $method === 'POST') {
     }
 }
 
-// 4. Update Username
+// 4. Update Username (Max 3 changes for normal users, unlimited for admin)
 if ($endpoint === 'community/profile/username' && $method === 'POST') {
     if ($pdo) {
         $userId = trim($body['user_id'] ?? '');
         $newUname = strtolower(trim($body['new_username'] ?? ''));
         $clean = preg_replace('/[^a-z0-9._]/', '', $newUname);
 
-        $uStmt = $pdo->prepare("SELECT email, is_admin FROM community_users WHERE id = ?");
+        $uStmt = $pdo->prepare("SELECT email, is_admin, username_change_count FROM community_users WHERE id = ?");
         $uStmt->execute([$userId]);
         $uInfo = $uStmt->fetch();
-        $isAdminUser = $uInfo && ($uInfo['email'] === 'omkumar.working@gmail.com' || !empty($uInfo['is_admin']));
+        if (!$uInfo) {
+            http_response_code(404);
+            echo json_encode(['error' => 'User not found.']);
+            exit;
+        }
+
+        $isAdminUser = ($uInfo['email'] === 'omkumar.working@gmail.com' || !empty($uInfo['is_admin']));
+        $changeCount = (int)($uInfo['username_change_count'] ?? 0);
 
         if (!$isAdminUser) {
+            if ($changeCount >= 3) {
+                http_response_code(400);
+                echo json_encode(['error' => 'You have reached the maximum limit of 3 username changes. Contact admin for assistance.']);
+                exit;
+            }
+
             if (strlen($clean) < 3 || strlen($clean) > 25) {
                 http_response_code(400);
                 echo json_encode(['error' => 'Username must be between 3 and 25 characters (letters, numbers, dot, underscore).']);
@@ -2037,10 +2139,59 @@ if ($endpoint === 'community/profile/username' && $method === 'POST') {
         }
 
         $now = date('c');
-        $pdo->prepare("UPDATE community_users SET username = ?, updated_at = ? WHERE id = ?")->execute([$clean, $now, $userId]);
+        $newCount = $isAdminUser ? $changeCount : ($changeCount + 1);
+        $pdo->prepare("UPDATE community_users SET username = ?, username_change_count = ?, updated_at = ? WHERE id = ?")->execute([$clean, $newCount, $now, $userId]);
         $pdo->prepare("UPDATE community_messages SET username = ? WHERE user_id = ?")->execute([$clean, $userId]);
 
-        echo json_encode(['success' => true, 'username' => $clean]);
+        echo json_encode(['success' => true, 'username' => $clean, 'username_change_count' => $newCount]);
+        exit;
+    }
+}
+
+// 4a. Update Display Name (Max 3 changes for normal users, unlimited for admin)
+if ($endpoint === 'community/profile/name' && $method === 'POST') {
+    if ($pdo) {
+        $userId = trim($body['user_id'] ?? '');
+        $newName = trim($body['new_name'] ?? '');
+
+        $uStmt = $pdo->prepare("SELECT email, is_admin, name_change_count FROM community_users WHERE id = ?");
+        $uStmt->execute([$userId]);
+        $uInfo = $uStmt->fetch();
+        if (!$uInfo) {
+            http_response_code(404);
+            echo json_encode(['error' => 'User not found.']);
+            exit;
+        }
+
+        $isAdminUser = ($uInfo['email'] === 'omkumar.working@gmail.com' || !empty($uInfo['is_admin']));
+        $changeCount = (int)($uInfo['name_change_count'] ?? 0);
+
+        if (!$isAdminUser) {
+            if ($changeCount >= 3) {
+                http_response_code(400);
+                echo json_encode(['error' => 'You have reached the maximum limit of 3 display name changes. Contact admin for assistance.']);
+                exit;
+            }
+
+            if (mb_strlen($newName) < 2 || mb_strlen($newName) > 60) {
+                http_response_code(400);
+                echo json_encode(['error' => 'Display name must be between 2 and 60 characters.']);
+                exit;
+            }
+        } else {
+            if (mb_strlen($newName) < 2 || mb_strlen($newName) > 100) {
+                http_response_code(400);
+                echo json_encode(['error' => 'Display name must be at least 2 characters.']);
+                exit;
+            }
+        }
+
+        $now = date('c');
+        $newCount = $isAdminUser ? $changeCount : ($changeCount + 1);
+        $pdo->prepare("UPDATE community_users SET name = ?, name_change_count = ?, updated_at = ? WHERE id = ?")->execute([$newName, $newCount, $now, $userId]);
+        $pdo->prepare("UPDATE community_messages SET user_name = ? WHERE user_id = ?")->execute([$newName, $userId]);
+
+        echo json_encode(['success' => true, 'name' => $newName, 'name_change_count' => $newCount]);
         exit;
     }
 }
@@ -3251,31 +3402,117 @@ if (strpos($endpoint, 'admin/') === 0) {
         exit;
     }
 
-    // Admin: Playlist search YouTube videos via Invidious / oEmbed
+    // Admin: Playlist search YouTube videos via direct scraping & oEmbed
     if ($endpoint === 'admin/playlist/search') {
         $q = trim($_GET['q'] ?? '');
         $results = [];
         if ($q) {
-            $invidiousInstances = ['https://vid.puffyan.us', 'https://invidious.nerdvpn.de', 'https://yewtu.be'];
-            foreach ($invidiousInstances as $inst) {
-                $url = "{$inst}/api/v1/search?q=" . urlencode($q) . "&type=video";
-                $ctx = stream_context_create(['http' => ['timeout' => 4]]);
-                $json = @file_get_contents($url, false, $ctx);
-                if ($json) {
-                    $data = json_decode($json, true);
-                    if (is_array($data)) {
-                        foreach (array_slice($data, 0, 15) as $item) {
-                            if (!empty($item['videoId'])) {
-                                $results[] = [
-                                    'videoId' => $item['videoId'],
-                                    'title' => $item['title'] ?? 'Nationalist Song',
-                                    'author' => $item['author'] ?? 'Artist',
-                                    'duration' => isset($item['lengthSeconds']) ? gmdate('i:s', (int)$item['lengthSeconds']) : '3:30',
-                                    'thumbnailUrl' => "https://i.ytimg.com/vi/{$item['videoId']}/hqdefault.jpg"
-                                ];
+            // 1. Direct YouTube Video URL or Video ID check
+            $videoId = null;
+            if (preg_match('/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([a-zA-Z0-9_-]{11})/', $q, $m)) {
+                $videoId = $m[1];
+            } elseif (preg_match('/^[a-zA-Z0-9_-]{11}$/', $q)) {
+                $videoId = $q;
+            }
+
+            if ($videoId) {
+                $oeUrl = "https://www.youtube.com/oembed?url=" . urlencode("https://www.youtube.com/watch?v={$videoId}") . "&format=json";
+                $ctx = stream_context_create([
+                    'http' => [
+                        'timeout' => 4,
+                        'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
+                    ]
+                ]);
+                $oeJson = @file_get_contents($oeUrl, false, $ctx);
+                $title = "YouTube Track ({$videoId})";
+                $author = 'Artist';
+                if ($oeJson) {
+                    $oe = json_decode($oeJson, true);
+                    if (!empty($oe['title'])) $title = $oe['title'];
+                    if (!empty($oe['author_name'])) $author = $oe['author_name'];
+                }
+                $results[] = [
+                    'videoId' => $videoId,
+                    'title' => $title,
+                    'author' => $author,
+                    'duration' => '3:30',
+                    'thumbnailUrl' => "https://i.ytimg.com/vi/{$videoId}/hqdefault.jpg"
+                ];
+            } else {
+                // 2. Direct Scrape of YouTube Search Results
+                $ytSearchUrl = "https://www.youtube.com/results?search_query=" . urlencode($q);
+                $html = '';
+                if (function_exists('curl_init')) {
+                    $ch = curl_init();
+                    curl_setopt($ch, CURLOPT_URL, $ytSearchUrl);
+                    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+                    curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+                    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept-Language: en-US,en;q=0.9',
+                        'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                    ]);
+                    $html = curl_exec($ch);
+                    curl_close($ch);
+                }
+                if (!$html) {
+                    $ctx = stream_context_create([
+                        'http' => [
+                            'timeout' => 5,
+                            'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36\r\nAccept-Language: en-US,en;q=0.9\r\n"
+                        ]
+                    ]);
+                    $html = @file_get_contents($ytSearchUrl, false, $ctx);
+                }
+
+                if ($html && (preg_match('/var ytInitialData = ({.*?});<\/script>/s', $html, $matches) || preg_match('/ytInitialData\s*=\s*({.+?});/s', $html, $matches))) {
+                    $data = json_decode($matches[1], true);
+                    $contents = $data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents'][0]['itemSectionRenderer']['contents'] ?? [];
+                    foreach ($contents as $item) {
+                        $vr = $item['videoRenderer'] ?? null;
+                        if ($vr && !empty($vr['videoId'])) {
+                            $results[] = [
+                                'videoId' => $vr['videoId'],
+                                'title' => $vr['title']['runs'][0]['text'] ?? 'Nationalist Song',
+                                'author' => $vr['ownerText']['runs'][0]['text'] ?? ($vr['shortBylineText']['runs'][0]['text'] ?? 'Artist'),
+                                'duration' => $vr['lengthText']['simpleText'] ?? '3:30',
+                                'thumbnailUrl' => "https://i.ytimg.com/vi/{$vr['videoId']}/hqdefault.jpg"
+                            ];
+                            if (count($results) >= 15) break;
+                        }
+                    }
+                }
+
+                // 3. Fallback: Try Invidious instances if direct scrape yielded 0 items
+                if (empty($results)) {
+                    $invidiousInstances = ['https://yewtu.be', 'https://invidious.nerdvpn.de', 'https://inv.nadeko.net'];
+                    foreach ($invidiousInstances as $inst) {
+                        $url = "{$inst}/api/v1/search?q=" . urlencode($q) . "&type=video";
+                        $ctx = stream_context_create([
+                            'http' => [
+                                'timeout' => 4,
+                                'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
+                            ]
+                        ]);
+                        $json = @file_get_contents($url, false, $ctx);
+                        if ($json) {
+                            $data = json_decode($json, true);
+                            if (is_array($data)) {
+                                foreach (array_slice($data, 0, 15) as $item) {
+                                    if (!empty($item['videoId'])) {
+                                        $results[] = [
+                                            'videoId' => $item['videoId'],
+                                            'title' => $item['title'] ?? 'Nationalist Song',
+                                            'author' => $item['author'] ?? 'Artist',
+                                            'duration' => isset($item['lengthSeconds']) ? gmdate('i:s', (int)$item['lengthSeconds']) : '3:30',
+                                            'thumbnailUrl' => "https://i.ytimg.com/vi/{$item['videoId']}/hqdefault.jpg"
+                                        ];
+                                    }
+                                }
+                                if (!empty($results)) break;
                             }
                         }
-                        if (!empty($results)) break;
                     }
                 }
             }

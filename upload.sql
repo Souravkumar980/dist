@@ -292,6 +292,8 @@ CREATE TABLE `community_users` (
   `ip_address` VARCHAR(64) DEFAULT NULL,
   `is_admin` TINYINT(1) NOT NULL DEFAULT 0,
   `is_banned` TINYINT(1) NOT NULL DEFAULT 0,
+  `name_change_count` INT NOT NULL DEFAULT 0,
+  `username_change_count` INT NOT NULL DEFAULT 0,
   `created_at` VARCHAR(64) NOT NULL,
   `updated_at` VARCHAR(64) NOT NULL,
   PRIMARY KEY (`id`),

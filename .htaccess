@@ -10,6 +10,10 @@
   RewriteRule .* - [E=HTTP_X_ADMIN_KEY:%{HTTP:x-admin-key}]
   RewriteRule .* - [E=HTTP_X_APP_KEY:%{HTTP:x-app-key}]
 
+  # Block scrapers, offline site copy tools, and code extractors
+  RewriteCond %{HTTP_USER_AGENT} (HTTrack|SiteSucker|Wget|Python-urllib|Scrapy|HeadlessChrome|PhantomJS|webcopier|teleport|offline|extractor) [NC]
+  RewriteRule .* - [F,L]
+
   # Proxy /api requests to PHP API backend if Node server is not active
   RewriteCond %{REQUEST_FILENAME} !-f
   RewriteRule ^api/(.*)$ api.php?endpoint=$1 [QSA,L]
