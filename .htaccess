@@ -41,4 +41,6 @@ Options -Indexes
 <IfModule mod_headers.c>
   Header set X-Content-Type-Options "nosniff"
   Header set Access-Control-Allow-Origin "*"
+  Header set Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+  Header set Access-Control-Allow-Headers "Content-Type, Authorization, x-admin-key, X-Admin-Key, x-app-key, X-App-Key, x-client-key, X-Client-Key, X-HTTP-Method-Override, X-EP-Timestamp, X-EP-Signature"
 </IfModule>

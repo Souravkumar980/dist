@@ -13,7 +13,34 @@ ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, x-admin-key, X-Admin-Key');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, x-admin-key, X-Admin-Key, x-app-key, X-App-Key, x-client-key, X-Client-Key, X-HTTP-Method-Override, X-EP-Timestamp, X-EP-Signature');
+
+// Guaranteed JSON output: Prevent PHP from ever returning HTML errors on shared hosting
+set_exception_handler(function($e) {
+    http_response_code(500);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode([
+        'error' => $e->getMessage(),
+        'success' => false,
+        'code' => 500
+    ], JSON_UNESCAPED_SLASHES);
+    exit;
+});
+
+register_shutdown_function(function() {
+    $err = error_get_last();
+    if ($err && in_array($err['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
+        http_response_code(500);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'error' => 'Fatal Server Error: ' . $err['message'],
+            'file' => basename($err['file']),
+            'line' => $err['line'],
+            'success' => false,
+            'code' => 500
+        ], JSON_UNESCAPED_SLASHES);
+    }
+});
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
@@ -76,6 +103,26 @@ try {
     $db_type = 'mysql';
 } catch (Exception $e) {
     $db_error = $e->getMessage();
+}
+
+// Attempt 1.5: If remote host failed, try alternate cluster hostnames (sql200.byetcluster.com, sql200.epizy.com, 192.168.0.170)
+if (!$pdo) {
+    $altHosts = ['sql200.byetcluster.com', 'sql200.epizy.com', '192.168.0.170'];
+    foreach ($altHosts as $altH) {
+        if ($altH === $db_host) continue;
+        try {
+            $dsnAlt = "mysql:host={$altH};port={$db_port};dbname={$db_name};charset=utf8mb4";
+            $pdo = new PDO($dsnAlt, $db_user, $db_pass, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::ATTR_TIMEOUT => 3
+            ]);
+            $db_type = 'mysql';
+            $db_host = $altH;
+            $db_error = null;
+            break;
+        } catch (Exception $eAlt) {}
+    }
 }
 
 // Attempt 2: If remote host failed and was not localhost, try localhost / 127.0.0.1
@@ -165,6 +212,15 @@ function is_admin_authorized($pdo = null) {
 
     if (!$auth && !empty($GLOBALS['body']['admin_token'])) {
         $auth = trim($GLOBALS['body']['admin_token']);
+    }
+    if (!$auth && !empty($GLOBALS['body']['adminKey'])) {
+        $auth = trim($GLOBALS['body']['adminKey']);
+    }
+    if (!$auth && !empty($_POST['admin_token'])) {
+        $auth = trim($_POST['admin_token']);
+    }
+    if (!$auth && !empty($_POST['adminKey'])) {
+        $auth = trim($_POST['adminKey']);
     }
 
     if (!$auth) return false;
@@ -648,10 +704,17 @@ if (strpos($endpoint, 'api/') === 0) {
     $endpoint = trim($endpoint, '/');
 }
 
-$method   = strtoupper($_SERVER['REQUEST_METHOD']);
+$method   = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 $inputJson = file_get_contents('php://input');
 $body = json_decode($inputJson, true) ?: ($GLOBALS['body'] ?? $_POST ?? []);
 $ip       = getClientIp();
+
+// Support HTTP Method Override for shared web hosts (InfinityFree, Apache, FastCGI)
+$headers = get_request_headers();
+$methodOverride = $headers['x-http-method-override'] ?? $_SERVER['HTTP_X_HTTP_METHOD_OVERRIDE'] ?? $_GET['_method'] ?? $body['_method'] ?? null;
+if ($methodOverride && in_array(strtoupper($methodOverride), ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])) {
+    $method = strtoupper($methodOverride);
+}
 
 // -------------------------------------------------------------
 // 6. Security Gate: Block Direct Browser Address Bar Inspection
@@ -2649,8 +2712,8 @@ if (strpos($endpoint, 'admin/') === 0) {
         exit;
     }
 
-    // Admin: Update Entity (PUT)
-    if (preg_match('/^admin\/entities\/([a-zA-Z0-9_-]+)$/', $endpoint, $m) && $method === 'PUT') {
+    // Admin: Update Entity (PUT or POST)
+    if (preg_match('/^admin\/entities\/([a-zA-Z0-9_-]+)$/', $endpoint, $m) && in_array($method, ['PUT', 'POST']) && ($body['_action'] ?? '') !== 'delete') {
         $entId = $m[1];
         $name = trim($body['name'] ?? '');
         $cleanX = extract_handle_php($body['handle_x'] ?? null, 'x');
@@ -2690,7 +2753,7 @@ if (strpos($endpoint, 'admin/') === 0) {
     }
 
     // Admin: Delete Entity
-    if (preg_match('/^admin\/entities\/([a-zA-Z0-9_-]+)$/', $endpoint, $m) && $method === 'DELETE') {
+    if (preg_match('/^admin\/entities\/([a-zA-Z0-9_-]+)$/', $endpoint, $m) && ($method === 'DELETE' || ($body['_action'] ?? '') === 'delete' || ($body['_method'] ?? '') === 'DELETE')) {
         $entId = $m[1];
         if ($pdo) {
             try {
@@ -2703,7 +2766,7 @@ if (strpos($endpoint, 'admin/') === 0) {
     }
 
     // Admin: Toggle Verify Entity
-    if (preg_match('/^admin\/entities\/([a-zA-Z0-9_-]+)\/verify$/', $endpoint, $m) && $method === 'PATCH') {
+    if (preg_match('/^admin\/entities\/([a-zA-Z0-9_-]+)\/verify$/', $endpoint, $m) && in_array($method, ['PATCH', 'POST', 'GET'])) {
         $entId = $m[1];
         $is_verified = 1;
         if ($pdo) {
@@ -2720,7 +2783,7 @@ if (strpos($endpoint, 'admin/') === 0) {
     }
 
     // Admin: Edit Entity Upvotes
-    if (preg_match('/^admin\/entities\/([a-zA-Z0-9_-]+)\/upvotes$/', $endpoint, $m) && $method === 'PATCH') {
+    if (preg_match('/^admin\/entities\/([a-zA-Z0-9_-]+)\/upvotes$/', $endpoint, $m) && in_array($method, ['PATCH', 'POST'])) {
         $entId = $m[1];
         $newVotes = max(0, (int)($body['upvotes'] ?? 0));
         if ($pdo) {
@@ -3234,7 +3297,7 @@ if (strpos($endpoint, 'admin/') === 0) {
     // Admin: Edit or Delete Single Post
     if (preg_match('/^admin\/posts\/([a-zA-Z0-9_-]+)$/', $endpoint, $m)) {
         $postId = $m[1];
-        if ($method === 'PUT') {
+        if (in_array($method, ['PUT', 'POST']) && ($body['_action'] ?? '') !== 'delete') {
             $title = trim($body['title'] ?? '');
             $content = trim($body['content'] ?? '');
             $badge = trim($body['badge'] ?? 'DISPATCH') ?: 'DISPATCH';
@@ -3252,7 +3315,7 @@ if (strpos($endpoint, 'admin/') === 0) {
             exit;
         }
 
-        if ($method === 'DELETE') {
+        if ($method === 'DELETE' || ($body['_action'] ?? '') === 'delete' || ($body['_method'] ?? '') === 'DELETE') {
             if ($pdo) {
                 try {
                     $stmt = $pdo->prepare("DELETE FROM admin_posts WHERE id = ?");
