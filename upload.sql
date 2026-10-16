@@ -32,12 +32,15 @@ CREATE TABLE `entities` (
   `fact_check` TEXT DEFAULT NULL,
   `proof_url` TEXT DEFAULT NULL,
   `upvotes` INT NOT NULL DEFAULT 0,
+  `rating_avg` FLOAT NOT NULL DEFAULT 0,
+  `rating_count` INT NOT NULL DEFAULT 0,
   `is_verified` TINYINT(1) NOT NULL DEFAULT 1,
   `submitted_by_ip` VARCHAR(64) DEFAULT NULL,
   `created_at` VARCHAR(64) NOT NULL,
   `updated_at` VARCHAR(64) NOT NULL,
   PRIMARY KEY (`id`),
   INDEX `idx_entities_upvotes` (`upvotes`),
+  INDEX `idx_entities_rating` (`rating_avg`),
   INDEX `idx_entities_party` (`party`),
   INDEX `idx_entities_institution` (`institution`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -324,10 +327,28 @@ CREATE TABLE `community_messages` (
   `reactions` TEXT DEFAULT NULL,
   `reply_to` TEXT DEFAULT NULL,
   `is_deleted` TINYINT(1) NOT NULL DEFAULT 0,
+  `created_timestamp` BIGINT NOT NULL DEFAULT 0,
   `created_at` VARCHAR(64) NOT NULL,
   PRIMARY KEY (`id`),
   INDEX `idx_comm_channel` (`channel_id`),
-  INDEX `idx_comm_msg_user` (`user_id`)
+  INDEX `idx_comm_msg_user` (`user_id`),
+  INDEX `idx_comm_msg_ts` (`created_timestamp`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- -------------------------------------------------------------
+-- Table: propagandu_ratings (5-Star Wanted Level per IP)
+-- -------------------------------------------------------------
+DROP TABLE IF EXISTS `propagandu_ratings`;
+CREATE TABLE `propagandu_ratings` (
+  `id` VARCHAR(100) NOT NULL,
+  `entity_id` VARCHAR(100) NOT NULL,
+  `ip_address` VARCHAR(64) NOT NULL,
+  `rating` INT NOT NULL,
+  `created_at` VARCHAR(64) NOT NULL,
+  `updated_at` VARCHAR(64) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_entity_ip` (`entity_id`, `ip_address`),
+  INDEX `idx_rating_entity` (`entity_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -------------------------------------------------------------
